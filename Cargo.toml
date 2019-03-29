@@ -1,0 +1,10 @@
+[package]
+name = "tuntap-rs"
+version = "0.1.0"
+authors = ["skye347 <s347419313@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+libc = "0.2"
+futures-preview = "0.3.0-alpha.13"
+bytes = "0.4.12"
