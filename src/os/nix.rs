@@ -81,7 +81,7 @@ pub enum ireq_flag {
     IFF_NO_PI = 0x1000,
 }
 
-pub fn open_tuntap_device(device: String) -> Option<StdFile> {
+pub fn open_tuntap_device(device: String, non_blocking: bool) -> Option<i32> {
     let tun_path = CString::new("/dev/net/tun").unwrap();
     let fd = unsafe {
         libc::open(tun_path.as_ptr(), libc::O_RDWR)
@@ -94,15 +94,23 @@ pub fn open_tuntap_device(device: String) -> Option<StdFile> {
         name: device,
         flags: 0,
     }.set_flag(ireq_flag::IFF_TAP).set_flag(ireq_flag::IFF_NO_PI).to_raw().unwrap();
-    let r = unsafe {
+    if unsafe {
         libc::ioctl(fd, TUNSETIFF, &s)
-    };
-    if r < 0 {
+    } < 0 {
         println!("ioctl err");
         unsafe { libc::close(fd); }
         return None;
     }
-    Some(unsafe { StdFile::from_raw_fd(fd) })
+    if non_blocking {
+        if unsafe {
+            libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK)
+        } < 0 {
+            println!("set non-blocking err");
+            unsafe { libc::close(fd); }
+            return None;
+        }
+    }
+    Some(fd)
 }
 
 pub fn simple_demo() {
