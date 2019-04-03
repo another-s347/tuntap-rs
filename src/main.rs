@@ -23,6 +23,8 @@ extern crate lazy_static;
 use crate::os::nix::{simple_demo, open_tuntap_device};
 use futures::StreamExt;
 use crate::os::linux::try_epoll;
+use bytes::BytesMut;
+use core::borrow::BorrowMut;
 
 pub mod os;
 
@@ -49,13 +51,15 @@ pub mod os;
 //}
 
 fn main() {
+    let mut buffer = BytesMut::with_capacity(1024);
+    buffer.resize(1024,0);
     let context=os::linux::EpollContext::new().unwrap();
     let tap = open_tuntap_device("tap1".to_string(),true).unwrap();
-    let tap_stream = os::linux::FdStream {
+    let tap_stream = os::linux::FdReadStream {
         context:context.clone(),
         fd: tap,
         waker: None,
-        buf: vec![0u8;024]
+        buf:buffer
     };
     context.spawn_executor();
     futures::executor::block_on(tap_stream.for_each(|_|{

@@ -1,41 +1,43 @@
 use libc;
 use nix::sys::epoll::{epoll_create, epoll_wait, EpollEvent};
 use nix::sys::epoll::EpollOp::EpollCtlAdd;
-use nix::unistd::read;
+use nix::unistd::{read, write};
 use futures::stream::Stream;
 use futures::task::Waker;
-use futures::Poll;
+use futures::{Poll, Future};
 use std::thread::{JoinHandle,self};
 use std::os::unix::io::RawFd;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex, Arc, RwLock};
 use crate::os::nix::open_tuntap_device;
+use bytes::BytesMut;
+use nix::sys::epoll::EpollFlags;
+use core::borrow::BorrowMut;
 
 lazy_static! {
     static ref EPOLL_GLOBAL:EpollContext = EpollContext::new().unwrap();
 }
 
-pub struct FdStream {
+pub struct FdReadStream {
     pub context:EpollContext,
     pub fd:RawFd,
     pub waker:Option<Waker>,
-    pub buf:Vec<u8>
+    pub buf:BytesMut
 }
 
-impl Stream for FdStream {
+impl Stream for FdReadStream {
     type Item = ();
 
     fn poll_next(mut self: Pin<&mut Self>, waker: &Waker) -> Poll<Option<Self::Item>> {
         if self.waker.is_none() {
             self.waker=Some(waker.clone());
-            // set waker
             let fd = self.fd.clone();
-            self.context.add_fd(fd,waker.clone());
+            self.context.add_fd(fd,waker.clone(),nix::sys::epoll::EpollFlags::EPOLLIN);
             return Poll::Pending;
         }
         let this_waker = (&self).waker.clone().unwrap();
-        match read(self.fd,&mut self.buf) {
+        match read(self.fd, self.buf.borrow_mut()) {
             Ok(size)=>{
                 println!("read size == {}",size);
                 Poll::Ready(Some(()))
@@ -51,10 +53,53 @@ impl Stream for FdStream {
     }
 }
 
+pub struct FdWriteFuture {
+    pub context:EpollContext,
+    pub fd:RawFd,
+    pub waker:Option<Waker>,
+    pub buf:BytesMut,
+    pub remaining: usize
+}
+
+impl Future for FdWriteFuture {
+    type Output = Option<()>;
+
+    fn poll(mut self: Pin<&mut Self>, lw: &Waker) -> Poll<Self::Output> {
+        let this_waker = if self.waker.is_none() {
+            self.waker=Some(lw.clone());
+            let fd = self.fd.clone();
+            self.context.add_fd(fd,lw.clone(),nix::sys::epoll::EpollFlags::EPOLLOUT);
+            lw.clone()
+        } else {
+            self.waker.clone().unwrap()
+        };
+        match write(self.fd,self.buf.as_ref()) {
+            Ok(size) if size == self.remaining => {
+                Poll::Ready(Some(()))
+            }
+            Ok(size) if size < self.remaining => {
+                println!("will wake?");
+                self.buf.advance(size);
+                self.remaining-=size;
+                lw.will_wake(&this_waker);
+                Poll::Pending
+            }
+            Err(nix::Error::Sys(EAGAIN))=>{
+                lw.will_wake(&this_waker);
+                Poll::Pending
+            }
+            e => {
+                dbg!(e);
+                Poll::Ready(None)
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EpollContext {
     pub epoll_fd:RawFd,
-    pub wakers:Arc<Mutex<HashMap<RawFd,Waker>>>
+    pub wakers:Arc<RwLock<HashMap<RawFd,Waker>>>
 }
 
 impl EpollContext {
@@ -62,7 +107,7 @@ impl EpollContext {
         epoll_create().map(|fd|{
             EpollContext {
                 epoll_fd:fd,
-                wakers:Arc::new(Mutex::new(HashMap::new()))
+                wakers:Arc::new(RwLock::new(HashMap::new()))
             }
         }).ok()
     }
@@ -72,21 +117,16 @@ impl EpollContext {
         let wakers = self.wakers.clone();
         thread::spawn(move||{
             let mut events: Vec<EpollEvent> = Vec::new();
-            for _ in 0..2 {
+            for _ in 0..10 {
                 events.push(EpollEvent::empty());
             }
             loop {
-                println!("wait");
-                let c=epoll_wait(epoll_fd,&mut events,300000).unwrap();
-                println!("size {}",c);
-                wakers.lock().map(|w|{
+                let c=epoll_wait(epoll_fd,&mut events,-1).unwrap();
+                wakers.read().map(|w|{
                     for i in &events {
                         let fd = i.data() as i32;
                         if let Some(waker)=w.get(&fd) {
                             waker.wake();
-                        }
-                        else{
-                            println!("??? == {}",fd);
                         }
                     }
                 });
@@ -94,11 +134,12 @@ impl EpollContext {
         })
     }
 
-    pub fn add_fd(&mut self,fd:RawFd,waker:Waker) {
-        self.wakers.lock().unwrap().insert(fd,waker);
-        let mut epoll_event = nix::sys::epoll::EpollEvent::new(nix::sys::epoll::EpollFlags::EPOLLIN, fd as u64);
-        nix::sys::epoll::epoll_ctl(self.epoll_fd, EpollCtlAdd, fd, Some(&mut epoll_event)).unwrap();
-        println!("added");
+    pub fn add_fd(&mut self,fd:RawFd,waker:Waker,flags:EpollFlags) -> Result<(),()> {
+        self.wakers.write().unwrap().insert(fd,waker);
+        let mut epoll_event = nix::sys::epoll::EpollEvent::new(flags, fd as u64);
+        nix::sys::epoll::epoll_ctl(self.epoll_fd, EpollCtlAdd, fd, Some(&mut epoll_event)).map_err(|e|{
+            dbg!(e);
+        })
     }
 }
 
