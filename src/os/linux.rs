@@ -11,9 +11,11 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Mutex, Arc, RwLock};
 use crate::os::nix::open_tuntap_device;
-use bytes::BytesMut;
+use bytes::{BytesMut, Bytes};
 use nix::sys::epoll::EpollFlags;
 use core::borrow::BorrowMut;
+use futures::prelude::sink::Sink;
+use bytes::buf::BufMut;
 
 lazy_static! {
     static ref EPOLL_GLOBAL:EpollContext = EpollContext::new().unwrap();
@@ -57,42 +59,64 @@ pub struct FdWriteFuture {
     pub context:EpollContext,
     pub fd:RawFd,
     pub waker:Option<Waker>,
-    pub buf:BytesMut,
-    pub remaining: usize
+    pub buf:BytesMut
 }
 
-impl Future for FdWriteFuture {
-    type Output = Option<()>;
+impl Sink for FdWriteFuture {
+    type SinkItem = Bytes;
+    type SinkError = ();
 
-    fn poll(mut self: Pin<&mut Self>, lw: &Waker) -> Poll<Self::Output> {
-        let this_waker = if self.waker.is_none() {
-            self.waker=Some(lw.clone());
+    fn poll_ready(self:Pin<&mut Self>, waker: &Waker) -> Poll<Result<(), Self::SinkError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self:Pin<&mut Self>, item: Self::SinkItem) -> Result<(), Self::SinkError> {
+        if item.len() == 0 {
+            return Ok(())
+        }
+        self.buf.reserve(item.len());
+        self.buf.put(item);
+        Ok(())
+    }
+
+    fn poll_flush(mut self:Pin<&mut Self>, waker: &Waker) -> Poll<Result<(), Self::SinkError>> {
+        if self.waker.is_none() {
+            self.waker=Some(waker.clone());
             let fd = self.fd.clone();
-            self.context.add_fd(fd,lw.clone(),nix::sys::epoll::EpollFlags::EPOLLOUT);
-            lw.clone()
-        } else {
-            self.waker.clone().unwrap()
-        };
-        match write(self.fd,self.buf.as_ref()) {
-            Ok(size) if size == self.remaining => {
-                Poll::Ready(Some(()))
+            self.context.add_fd(fd,waker.clone(),nix::sys::epoll::EpollFlags::EPOLLOUT|nix::sys::epoll::EpollFlags::EPOLLONESHOT);
+        }
+        if self.buf.len() == 0 {
+            println!("flushed");
+            return Poll::Ready(Ok(()));
             }
-            Ok(size) if size < self.remaining => {
-                println!("will wake?");
+        let this_waker = (&self).waker.clone().unwrap();
+        match write(self.fd, self.buf.as_ref()) {
+            Ok(size)=>{
+                println!("write == {}",size);
                 self.buf.advance(size);
-                self.remaining-=size;
-                lw.will_wake(&this_waker);
-                Poll::Pending
+                if self.buf.len() == 0 {
+                    return Poll::Ready(Ok(()))
+                }
+                else {
+                    unimplemented!("what to do with waker?");
+                    // what to do with waker?
+                    return Poll::Pending;
+                }
             }
             Err(nix::Error::Sys(EAGAIN))=>{
-                lw.will_wake(&this_waker);
-                Poll::Pending
+                waker.will_wake(&this_waker);
+//                println!("eagain");
+                return Poll::Pending;
             }
-            e => {
+            e=>{
                 dbg!(e);
-                Poll::Ready(None)
+                Poll::Ready(Err(()))
+            }
             }
         }
+
+    fn poll_close(self:Pin<&mut Self>, waker: &Waker) -> Poll<Result<(), Self::SinkError>> {
+        self.poll_flush(waker)
     }
 }
 
