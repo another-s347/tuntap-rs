@@ -25,6 +25,9 @@ use futures::StreamExt;
 use crate::os::linux::try_epoll;
 use bytes::BytesMut;
 use core::borrow::BorrowMut;
+use futures::future::lazy;
+use futures::task::SpawnExt;
+use bytes::buf::BufMut;
 
 pub mod os;
 
@@ -51,19 +54,25 @@ pub mod os;
 //}
 
 fn main() {
-    let mut buffer = BytesMut::with_capacity(1024);
-    buffer.resize(1024,0);
-    let context=os::linux::EpollContext::new().unwrap();
-    let tap = open_tuntap_device("tap1".to_string(),true).unwrap();
-    let tap_stream = os::linux::FdReadStream {
-        context:context.clone(),
+    let mut buffer = BytesMut::with_capacity(256);
+    buffer.resize(256, 0);
+    let context = os::linux::EpollContext::new().unwrap();
+    let tap = open_tuntap_device("tap1".to_string(), true).unwrap();
+    let tap2 = open_tuntap_device("tap2".to_string(), true).unwrap();
+    let tap_read = os::linux::FdReadStream {
+        context: context.clone(),
         fd: tap,
         waker: None,
-        buf:buffer
+        buf: buffer,
+        size: 0
     };
+    let tap_writer=os::linux::FdWriteFuture {
+        context: context.clone(),
+        fd: tap2,
+        waker: None,
+        buf: BytesMut::new()
+    };
+    let task = tap_read.forward(tap_writer);
     context.spawn_executor();
-    futures::executor::block_on(tap_stream.for_each(|_|{
-        println!("execute!");
-        futures::future::ready(())
-    }));
+    futures::executor::block_on(task);
 }
