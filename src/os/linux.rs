@@ -25,11 +25,12 @@ pub struct FdReadStream {
     pub context:EpollContext,
     pub fd:RawFd,
     pub waker:Option<Waker>,
-    pub buf:BytesMut
+    pub buf:BytesMut,
+    pub size: usize
 }
 
 impl Stream for FdReadStream {
-    type Item = ();
+    type Item = Result<Bytes,()>;
 
     fn poll_next(mut self: Pin<&mut Self>, waker: &Waker) -> Poll<Option<Self::Item>> {
         if self.waker.is_none() {
@@ -40,9 +41,15 @@ impl Stream for FdReadStream {
         }
         let this_waker = (&self).waker.clone().unwrap();
         match read(self.fd, self.buf.borrow_mut()) {
+            Ok(size) if size==0 =>{
+                println!("done read == {}", self.size);
+                Poll::Ready(None)
+            }
             Ok(size)=>{
                 println!("read size == {}",size);
-                Poll::Ready(Some(()))
+                self.size += size;
+                let result = &self.buf.as_ref()[0..size];
+                Poll::Ready(Some(Ok(Bytes::from(result))))
             }
             Err(nix::Error::Sys(EAGAIN))=>{
                 waker.will_wake(&this_waker);
