@@ -95,7 +95,7 @@ impl Sink for FdWriteFuture {
         if self.buf.len() == 0 {
             println!("flushed");
             return Poll::Ready(Ok(()));
-            }
+        }
         let this_waker = (&self).waker.clone().unwrap();
         match write(self.fd, self.buf.as_ref()) {
             Ok(size)=>{
@@ -119,8 +119,8 @@ impl Sink for FdWriteFuture {
                 dbg!(e);
                 Poll::Ready(Err(()))
             }
-            }
         }
+    }
 
     fn poll_close(self:Pin<&mut Self>, waker: &Waker) -> Poll<Result<(), Self::SinkError>> {
         self.poll_flush(waker)
