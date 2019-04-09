@@ -99,7 +99,8 @@ impl Future for FdWriteFuture {
 #[derive(Clone)]
 pub struct EpollContext {
     pub epoll_fd:RawFd,
-    pub wakers:Arc<RwLock<HashMap<RawFd,Waker>>>
+    pub wakers:Arc<RwLock<HashMap<u64,Waker>>>,
+    pub counter: Arc<RwLock<u64>>
 }
 
 impl EpollContext {
@@ -107,7 +108,8 @@ impl EpollContext {
         epoll_create().map(|fd|{
             EpollContext {
                 epoll_fd:fd,
-                wakers:Arc::new(RwLock::new(HashMap::new()))
+                wakers:Arc::new(RwLock::new(HashMap::new())),
+                counter:Arc::new(RwLock::new(1))
             }
         }).ok()
     }
@@ -124,7 +126,7 @@ impl EpollContext {
                 let c=epoll_wait(epoll_fd,&mut events,-1).unwrap();
                 wakers.read().map(|w|{
                     for i in &events {
-                        let fd = i.data() as i32;
+                        let fd = i.data();
                         if let Some(waker)=w.get(&fd) {
                             waker.wake();
                         }
@@ -135,8 +137,15 @@ impl EpollContext {
     }
 
     pub fn add_fd(&mut self,fd:RawFd,waker:Waker,flags:EpollFlags) -> Result<(),()> {
-        self.wakers.write().unwrap().insert(fd,waker);
-        let mut epoll_event = nix::sys::epoll::EpollEvent::new(flags, fd as u64);
+        let id = {
+            let mut counter: RwLockWriteGuard<u64> = self.counter.write().unwrap();
+            let id:u64 = (*counter).clone();
+            *counter+=1;
+            let mut wakers = self.wakers.write().unwrap();
+            wakers.insert(id,waker);
+            id
+        };
+        let mut epoll_event = nix::sys::epoll::EpollEvent::new(flags, id);
         nix::sys::epoll::epoll_ctl(self.epoll_fd, EpollCtlAdd, fd, Some(&mut epoll_event)).map_err(|e|{
             dbg!(e);
         })
