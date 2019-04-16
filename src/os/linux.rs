@@ -4,7 +4,8 @@ use nix::sys::epoll::EpollOp::EpollCtlAdd;
 use nix::unistd::{read, write};
 use futures::stream::Stream;
 use futures::task::Waker;
-use futures::{Poll, Future};
+use futures::{Poll};
+use futures::future::Future;
 use std::thread::{JoinHandle,self};
 use std::os::unix::io::RawFd;
 use std::collections::HashMap;
@@ -16,6 +17,9 @@ use nix::sys::epoll::EpollFlags;
 use core::borrow::BorrowMut;
 use futures::prelude::sink::Sink;
 use bytes::buf::BufMut;
+use std::mem;
+use std::mem::MaybeUninit;
+use std::os::raw::{c_int, c_void};
 
 lazy_static! {
     static ref EPOLL_GLOBAL:EpollContext = EpollContext::new().unwrap();
@@ -93,7 +97,6 @@ impl Sink for FdWriteFuture {
             self.context.add_fd(fd,waker.clone(),nix::sys::epoll::EpollFlags::EPOLLOUT|nix::sys::epoll::EpollFlags::EPOLLONESHOT);
         }
         if self.buf.len() == 0 {
-            println!("flushed");
             return Poll::Ready(Ok(()));
         }
         let this_waker = (&self).waker.clone().unwrap();
@@ -169,7 +172,7 @@ impl EpollContext {
 
     pub fn add_fd(&mut self,fd:RawFd,waker:Waker,flags:EpollFlags) -> Result<(),()> {
         let id = {
-            let mut counter: RwLockWriteGuard<u64> = self.counter.write().unwrap();
+            let mut counter = self.counter.write().unwrap();
             let id:u64 = (*counter).clone();
             *counter+=1;
             let mut wakers = self.wakers.write().unwrap();
@@ -180,26 +183,5 @@ impl EpollContext {
         nix::sys::epoll::epoll_ctl(self.epoll_fd, EpollCtlAdd, fd, Some(&mut epoll_event)).map_err(|e|{
             dbg!(e);
         })
-    }
-}
-
-pub fn try_epoll() {
-    let epoll_fd = epoll_create().unwrap();
-    //let tap=0;
-    let tap = open_tuntap_device("tap1".to_string(),true).unwrap();
-    let mut epoll_event=nix::sys::epoll::EpollEvent::new(nix::sys::epoll::EpollFlags::EPOLLIN,tap as u64);
-    nix::sys::epoll::epoll_ctl(epoll_fd,EpollCtlAdd,tap,Some(&mut epoll_event));
-    let mut events:Vec<EpollEvent> = Vec::new();
-    for _ in 0..1 {
-        events.push(EpollEvent::empty());
-    }
-    let mut buffer = vec![0u8;1024];
-    loop {
-        let c=epoll_wait(epoll_fd,&mut events,300000).unwrap();
-        println!("c == {}",c);
-        for i in &events {
-            let size=read(i.data() as i32,buffer.as_mut()).unwrap();
-            println!("read size = {}",size);
-        }
     }
 }
