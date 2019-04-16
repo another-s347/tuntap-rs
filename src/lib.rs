@@ -1,4 +1,6 @@
 #![feature(futures_api)]
+#![feature(bind_by_move_pattern_guards)]
+#![feature(maybe_uninit)]
 #[macro_use]
 extern crate lazy_static;
 
@@ -19,16 +21,7 @@ extern crate lazy_static;
 //use tokio::prelude::future::lazy;
 //use tokio::prelude::stream::Stream;
 //use tokio::sync::mpsc::*;
-
-use crate::os::nix::{simple_demo, open_tuntap_device};
-use futures::StreamExt;
-use crate::os::linux::try_epoll;
-use bytes::BytesMut;
-use core::borrow::BorrowMut;
-use futures::future::lazy;
-use futures::task::SpawnExt;
-use bytes::buf::BufMut;
-
+#[cfg(target_os = "linux")]
 pub mod os;
 
 //fn test() {
@@ -52,27 +45,33 @@ pub mod os;
 //        Ok(())
 //    }));
 //}
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod tests {
+    use core::borrow::BorrowMut;
 
-fn main() {
-    let mut buffer = BytesMut::with_capacity(256);
-    buffer.resize(256, 0);
-    let context = os::linux::EpollContext::new().unwrap();
-    let tap = open_tuntap_device("tap1".to_string(), true).unwrap();
-    let tap2 = open_tuntap_device("tap2".to_string(), true).unwrap();
-    let tap_read = os::linux::FdReadStream {
-        context: context.clone(),
-        fd: tap,
-        waker: None,
-        buf: buffer,
-        size: 0
-    };
-    let tap_writer=os::linux::FdWriteFuture {
-        context: context.clone(),
-        fd: tap2,
-        waker: None,
-        buf: BytesMut::new()
-    };
-    let task = tap_read.forward(tap_writer);
-    context.spawn_executor();
-    futures::executor::block_on(task);
+    use bytes::buf::BufMut;
+    use bytes::BytesMut;
+    use futures::future::lazy;
+    use futures::StreamExt;
+    use futures::task::SpawnExt;
+
+    use crate::os;
+    use crate::os::nix::{open_tuntap_device, simple_demo};
+    use crate::os::{TunTap};
+    use futures::future::{Future,FutureExt};
+    use std::time::SystemTime;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn main() {
+        let context = os::linux::EpollContext::new().unwrap();
+        let tap = os::TunTap::new("tap1".to_string(), true).unwrap();
+        let tap2 = os::TunTap::new("tap2".to_string(), true).unwrap();
+        let (tap_read,_) = tap.split_to_epoll_stream(context.clone());
+        let (_, tap_writer) = tap2.split_to_epoll_stream(context.clone());
+        let task = tap_read.take(10).forward(tap_writer);
+        context.spawn_executor();
+        futures::executor::block_on(task);
+    }
 }
