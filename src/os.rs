@@ -1,26 +1,15 @@
-use std::collections::vec_deque;
-use std::collections::VecDeque;
-use std::fs::{File as StdFile, read};
-use std::marker::Unpin;
+use std::fs::{File as StdFile};
 use std::os::raw::c_int;
 use std::os::unix::io::FromRawFd;
-use std::pin::Pin;
-use std::time::{Duration, Instant};
-use futures::future::Future;
-use bytes::BytesMut;
-use futures::{Poll, Stream};
-use futures::task::Waker;
-use tokio::fs::File as TokioFile;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::io::{ReadHalf, WriteHalf};
-
-use ::nix::unistd::close;
-
-use crate::os::linux::{EpollContext, FdReadStream, FdWriteFuture};
 use std::sync::Arc;
+use mio::{ PollOpt, Token, Ready};
+use mio::unix::EventedFd;
+use ::nix::unistd::{read, write};
+use ::nix::unistd::close;
+use std::io::Error;
+use tokio::reactor::PollEvented2;
 
 pub mod nix;
-pub mod linux;
 
 #[cfg(target_os = "linux")]
 pub struct TunTap {
@@ -29,6 +18,10 @@ pub struct TunTap {
 
 #[cfg(target_os = "linux")]
 impl TunTap {
+    pub fn new_raw(device: String, non_blocking: bool) -> Option<i32> {
+        nix::open_tuntap_device(device, non_blocking)
+    }
+
     pub fn new(device: String, non_blocking: bool) -> Option<TunTap> {
         nix::open_tuntap_device(device, non_blocking).map(|fd| {
             TunTap {
@@ -43,36 +36,8 @@ impl TunTap {
         }
     }
 
-    pub fn split_to_tokio_stream(&self) -> (ReadHalf<TokioFile>, WriteHalf<TokioFile>) {
-        let f1 = unsafe {
-            StdFile::from_raw_fd((self.as_ref()).clone())
-        };
-        let f2 = unsafe {
-            StdFile::from_raw_fd((self.as_ref()).clone())
-        };
-        let (read, _) = tokio::fs::File::from_std(f1).split();
-        let (_, write) = tokio::fs::File::from_std(f2).split();
-        (read, write)
-    }
-
-    pub fn split_to_epoll_stream(&self, epollContext: EpollContext) -> (FdReadStream, FdWriteFuture) {
-        let read_buffer_size: usize = 1024;
-        let mut buffer = BytesMut::with_capacity(read_buffer_size);
-        buffer.resize(read_buffer_size, 0);
-        let read = linux::FdReadStream {
-            context: epollContext.clone(),
-            fd: (self.as_ref()).clone(),
-            waker: None,
-            buf: buffer,
-            size: 0,
-        };
-        let write = linux::FdWriteFuture {
-            context: epollContext,
-            fd: (self.as_ref()).clone(),
-            waker: None,
-            buf: BytesMut::new(),
-        };
-        (read, write)
+    pub fn into_tokio(self) -> PollEvented2<Self> {
+        tokio::reactor::PollEvented2::new(self)
     }
 }
 
@@ -86,8 +51,56 @@ struct Inner(pub c_int);
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        unsafe {
-            close(self.0)
-        };
+        close(self.0).unwrap();
+    }
+}
+
+impl std::io::Read for TunTap {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        match read(self.inner.0, buf) {
+            Ok(size) => {
+                Ok(size)
+            }
+            Err(::nix::Error::Sys(EAGAIN)) => {
+                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock,""))
+            }
+            Err(other)=>{
+                Err(std::io::Error::new(std::io::ErrorKind::Other,other.to_string()))
+            }
+        }
+    }
+}
+
+impl std::io::Write for TunTap {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        match write(self.inner.0, buf) {
+            Ok(size) => {
+                Ok(size)
+            }
+            Err(::nix::Error::Sys(EAGAIN)) => {
+                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock,""))
+            }
+            Err(other)=>{
+                Err(std::io::Error::new(std::io::ErrorKind::Other,other.to_string()))
+            }
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        unimplemented!()
+    }
+}
+
+impl mio::event::Evented for TunTap {
+    fn register(&self, poll: &mio::Poll, token: Token, interest: Ready, opts: PollOpt) -> Result<(), Error> {
+        EventedFd(&self.inner.0).register(poll,token,interest,opts)
+    }
+
+    fn reregister(&self, poll: &mio::Poll, token: Token, interest: Ready, opts: PollOpt) -> Result<(), Error> {
+        EventedFd(&self.inner.0).reregister(poll,token,interest,opts)
+    }
+
+    fn deregister(&self, poll: &mio::Poll) -> Result<(), Error> {
+        EventedFd(&self.inner.0).deregister(poll)
     }
 }
